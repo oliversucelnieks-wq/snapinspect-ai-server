@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
@@ -8,110 +7,177 @@ app.use(express.json({ limit: '20mb' }));
 const PORT = process.env.PORT || 3000;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
-app.get('/', (req, res) => res.json({ status: 'SnapInspect AI v6.3' }));
+app.get('/', (req, res) => res.json({ status: 'SnapInspect AI v7.0' }));
 
-const SYSTEM = `You are a professional inspector and estimator. You assess all types of items honestly.
+// ─── Parse location string "City, Country" into OpenRouter user_location object
+function parseLocation(userLocation) {
+  if (!userLocation) return null;
+  const parts = userLocation.split(',').map(s => s.trim());
+  return {
+    type: 'approximate',
+    city: parts[0] || undefined,
+    country: parts[1] || undefined,
+  };
+}
 
-THE MOST IMPORTANT RULE ABOUT COSTS:
-Before giving ANY cost estimate, ask yourself: "How much does this item cost to buy brand new?"
-- If a new one costs $1-5 (cheap toy, pen, small plastic item) → repair cost is $0-$2 max. It's almost always cheaper to replace it.
-- If a new one costs $5-20 (small toy, book, basic item) → repair cost is $1-$8 max.
-- If a new one costs $20-50 → repair cost should be at most $5-$25.
-- The repair cost can NEVER exceed what the item costs new. Ever.
-- For items under $10: just say "Replace it" with the replacement cost. Don't pretend $2 toys need $50 repairs.
+// ─── Call AI without web search (for image analysis)
+async function callAI(messages) {
+  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+      'HTTP-Referer': 'https://snapinspect-ai-server.onrender.com',
+      'X-Title': 'SnapInspect AI',
+    },
+    body: JSON.stringify({
+      model: 'google/gemini-2.5-flash',
+      messages,
+      temperature: 0.1,
+      max_tokens: 3000,
+    }),
+  });
+  if (!r.ok) { const e = await r.text().catch(() => 'error'); throw new Error(`AI error (${r.status}): ${e}`); }
+  const d = await r.json();
+  const t = d.choices?.[0]?.message?.content;
+  if (!t) throw new Error('No response from AI');
+  return t;
+}
 
-ITEM CATEGORIES AND HOW TO PRICE THEM:
-1. CHEAP CONSUMER ITEMS (toys, printed paper, pens, small decorations, $0.50-$10 items):
-   - Give the replacement cost, not a repair cost
-   - A $0.99 toy monkey with peeling paint: "Cost to replace: $1-$3"
-   - A printed page: "Cost to reprint: $0.10-$0.50"
-   - A broken cheap plastic item: "Cost to replace: $1-$5"
+// ─── Call AI WITH web search (for tutorials — finds real prices + stores)
+async function callAIWithSearch(messages, userLocation) {
+  const locationObj = parseLocation(userLocation);
 
-2. MID-RANGE CONSUMER ITEMS (books, clothes, small electronics, $10-$100):
-   - Small repair: $2-$20 depending on complexity
-   - Replacement: actual retail price
+  // Build the web search tool with location bias
+  const webSearchTool = {
+    type: 'openrouter:web_search',
+    parameters: {
+      max_results: 8,
+      search_context_size: 'medium',
+      ...(locationObj && { user_location: locationObj }),
+    },
+  };
 
-3. FURNITURE AND APPLIANCES ($50-$2000):
-   - Minor repair: $15-$150
-   - Major repair or replacement varies
+  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+      'HTTP-Referer': 'https://snapinspect-ai-server.onrender.com',
+      'X-Title': 'SnapInspect AI',
+    },
+    body: JSON.stringify({
+      model: 'google/gemini-2.5-flash',
+      messages,
+      tools: [webSearchTool],
+      temperature: 0.1,
+      max_tokens: 4000,
+    }),
+  });
 
-4. PROPERTY/STRUCTURAL (walls, floors, roof, foundation):
-   - Use contractor rates: cracks from $170, water damage from $490, roof from $360
+  if (!r.ok) { const e = await r.text().catch(() => 'error'); throw new Error(`AI error (${r.status}): ${e}`); }
+  const d = await r.json();
+  const t = d.choices?.[0]?.message?.content;
+  if (!t) throw new Error('No response from AI');
+  return t;
+}
 
-5. VEHICLES:
-   - Use auto body rates: dents $175+, paint $360+, windshield $70+
+// ─── Prompts ──────────────────────────────────────────────────────────────────
 
-6. LOCATION: Adjust all prices to the user's local market.`;
+const INSPECT_SYSTEM = `You are a professional damage inspector and contractor. Identify defects and estimate repair costs accurately based on the type of item — cheap consumer items get replacement costs, structural/vehicle items get contractor rates.`;
 
-function getItemPricing(userLocation) {
-  const loc = userLocation ? `User location: ${userLocation}. Adjust prices for local market.` : 'Use standard market prices.';
-  return loc;
+function getInspectPrompt(focusHint, userLocation, description) {
+  const focus = focusHint ? `\n\n=== ANALYZE ONLY THIS AREA ===\n${focusHint}\n=== END ===\n\n` : '';
+  const desc = description ? `USER REQUEST: "${description}"\n` : '';
+  const loc = userLocation ? `User location: ${userLocation}.\n` : '';
+  return focus + desc + loc + `
+Analyze the image. Before pricing, identify what the item actually is and what it costs new.
+- Cheap consumer item ($1-10 new): give replacement cost only
+- Mid-range item ($10-100 new): repair or replacement cost
+- Property/structural: contractor rates
+- Vehicle: auto body rates
+
+Return ONLY valid JSON:
+{"defects":[{"id":"1","type":"damage type","severity":"low","confidence":"high","location":"where","dimensions":"size","description":"description","urgency":"optional","estimatedRepairCost":{"min":1,"max":3,"currency":"USD"}}],"overallCondition":"fair","conditionRationale":"why","summary":"2-3 sentence assessment","priorityAction":"what to do","totalEstimatedCost":{"min":1,"max":3,"currency":"USD"},"inspectionType":"other","professionalInspectionNeeded":false,"disclaimer":"Costs reflect actual replacement/repair value for this item type."}
+
+severity: critical/high/medium/low | urgency: immediate/repair_urgent/repair_soon/low_priority/optional
+If no damage: empty defects, excellent condition, costs 0.`;
 }
 
 function getProjectMode(description) {
   if (!description) return 'inspect';
   const d = description.toLowerCase();
-  if (d.match(/build|install|new|add|construct|fence|deck|shed|pergola|patio|driveway|landscap|lay|put up|erect/)) return 'build';
-  if (d.match(/renovat|remodel|redo|update|upgrade|replace|refresh|modernize/)) return 'renovate';
+  if (d.match(/build|install|new|add|construct|fence|deck|shed|patio|driveway|landscap/)) return 'build';
+  if (d.match(/renovat|remodel|redo|update|upgrade|modernize/)) return 'renovate';
   return 'inspect';
-}
-
-function getInspectPrompt(focusHint, userLocation, description) {
-  const focusBlock = focusHint ? `\n\n=== ANALYZE ONLY THIS SELECTED AREA ===\n${focusHint}\n=== END ===\n\n` : '';
-  const descBlock = description ? `USER REQUEST: "${description}"\n` : '';
-  return focusBlock + descBlock + `
-${getItemPricing(userLocation)}
-
-Analyze the image. Identify what the item actually is and how much it costs NEW, then price accordingly.
-
-Return ONLY valid JSON:
-{"defects":[{"id":"1","type":"peeling paint","severity":"low","confidence":"high","location":"toy body","dimensions":"small area","description":"Paint peeling on cheap plastic toy","urgency":"optional","estimatedRepairCost":{"min":1,"max":3,"currency":"USD"}}],"overallCondition":"fair","conditionRationale":"Minor cosmetic issue on low-value item","summary":"The toy has peeling paint. Given its low replacement cost of around $1-$3, replacing it is more practical than repairing it.","priorityAction":"Replace item for $1-$3","totalEstimatedCost":{"min":1,"max":3,"currency":"USD"},"inspectionType":"other","professionalInspectionNeeded":false,"disclaimer":"Repair cost based on actual item value and replacement availability."}
-
-severity: critical=safety hazard / high=major damage / medium=noticeable / low=cosmetic
-urgency: immediate / repair_urgent / repair_soon / low_priority / optional / replace_instead
-If no damage: empty defects, overallCondition excellent, costs 0.`;
 }
 
 function getRoomPrompt(description, userLocation) {
   const mode = getProjectMode(description);
-  let modeNote = '';
-  if (mode === 'build') modeNote = 'User wants to BUILD something. Price the construction project.';
-  else if (mode === 'renovate') modeNote = 'User wants to RENOVATE. List all tasks in order.';
-  else modeNote = 'Assess all visible issues. Price each item based on its actual type and value.';
-
-  const descBlock = description ? `USER PROJECT: "${description}"\n` : '';
-  return `Analyze ALL photos as one space. ${descBlock}${modeNote}
-${getItemPricing(userLocation)}
-
-For each item, estimate costs based on what that specific item actually costs new.
-Use the same JSON structure as single inspection.`;
+  const desc = description ? `PROJECT: "${description}"\n` : '';
+  const loc = userLocation ? `Location: ${userLocation}.\n` : '';
+  let modeNote = mode === 'build' ? 'User wants to BUILD. Break into tasks with realistic costs.'
+    : mode === 'renovate' ? 'User wants to RENOVATE. List all tasks in order.'
+    : 'Assess all visible issues with accurate costs for each item type.';
+  return `Analyze ALL photos as one space. ${desc}${loc}${modeNote}
+Price each item based on what it actually is (toy = replacement cost, wall = contractor rates).
+Use same JSON structure as single inspection.`;
 }
 
+const TUTORIAL_SYSTEM = `You are a contractor and pricing expert. When asked for materials and prices, SEARCH THE WEB for actual current prices in the user's location. Do NOT guess or estimate from memory — search for real prices. Also SEARCH for actual stores near the user that sell these materials.`;
+
 function getTutorialPrompt(defect, userLocation) {
-  return `Give a practical fix guide for: ${defect.type || 'damage'} (severity: ${defect.severity}, location: ${defect.location || 'unknown'}).
+  const loc = userLocation ? `User is in: ${userLocation}.` : '';
+  return `Generate a complete repair/fix guide for this specific issue.
+
+DEFECT: ${defect.type || 'damage'}
+Severity: ${defect.severity || 'medium'}
+Location: ${defect.location || 'unknown'}
 Description: ${defect.description || ''}
+Size: ${defect.dimensions || 'unknown'}
+${loc}
 
-${getItemPricing(userLocation)}
+IMPORTANT INSTRUCTIONS:
+1. Search for the ACTUAL current retail price of each material in ${userLocation || 'the user\'s area'} (e.g. search "spray paint price [city]", "craft paint price [store]").
+2. Search for actual stores near ${userLocation || 'the user'} that sell these materials (e.g. search "hardware stores near [city]", "craft stores near [city]", "[material] where to buy [city]").
+3. Only include stores you actually find via search — never make up store names or addresses.
+4. Only include prices you actually find via search — cite the source.
 
-IMPORTANT: If this is a cheap item (under $10 to replace), say so upfront and suggest replacement as the primary option. Only describe a repair if it genuinely makes economic sense.
-
-Return JSON:
+Return ONLY valid JSON (no markdown):
 {
-  "overview": "What this is, cost to replace new vs repair",
+  "overview": "What this defect is and the best way to fix it",
   "difficulty": "Easy / Moderate / Advanced",
-  "estimatedTime": "e.g. 10 minutes",
+  "estimatedTime": "e.g. 30 minutes",
   "diyRecommended": true,
-  "safetyNotes": [],
-  "materials": [{"name": "item", "note": "tip", "estimatedCost": "$X"}],
-  "totalMaterialCost": "$X",
-  "steps": [{"title": "step", "description": "details", "tip": null}],
-  "disclaimer": "Consider replacement cost vs repair cost."
+  "safetyNotes": ["safety note if needed"],
+  "materials": [
+    {
+      "name": "material name",
+      "note": "specification (e.g. 'acrylic craft paint, 59ml')",
+      "estimatedCost": "actual price found (e.g. '$2.49 at Walmart')",
+      "source": "where you found this price (store name or website)"
+    }
+  ],
+  "totalMaterialCost": "sum of materials",
+  "steps": [
+    {"title": "Step name", "description": "Detailed instruction", "tip": "pro tip or null"}
+  ],
+  "nearbyStores": [
+    {
+      "name": "Store name (real, found via search)",
+      "type": "Hardware store / Craft store / Supermarket / etc",
+      "address": "address if found",
+      "note": "which materials they carry"
+    }
+  ],
+  "disclaimer": "Prices from web search and may vary. Check store for current availability."
 }`;
 }
 
+// ─── JSON parsing ─────────────────────────────────────────────────────────────
 function parseJSON(text) {
-  const clean = text.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim();
-  try { return JSON.parse(clean); } catch(e) {
+  const clean = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+  try { return JSON.parse(clean); } catch {
     const m = clean.match(/\{[\s\S]*\}/);
     if (m) { try { return JSON.parse(m[0]); } catch {} }
     throw new Error('Could not parse AI response');
@@ -120,86 +186,85 @@ function parseJSON(text) {
 
 function normalize(p) {
   return {
-    defects:(p.defects||[]).map((d,i)=>({
-      id:d.id||String(i+1), type:d.type||'Issue',
-      severity:['low','medium','high','critical'].includes(d.severity)?d.severity:'medium',
-      confidence:['high','medium','low'].includes(d.confidence)?d.confidence:'medium',
-      location:d.location||'', dimensions:d.dimensions||'', description:d.description||'',
-      urgency:d.urgency||'repair_soon',
-      estimatedRepairCost:d.estimatedRepairCost||{min:0,max:0,currency:'USD'}
+    defects: (p.defects || []).map((d, i) => ({
+      id: d.id || String(i + 1),
+      type: d.type || 'Issue',
+      severity: ['low','medium','high','critical'].includes(d.severity) ? d.severity : 'medium',
+      confidence: ['high','medium','low'].includes(d.confidence) ? d.confidence : 'medium',
+      location: d.location || '',
+      dimensions: d.dimensions || '',
+      description: d.description || '',
+      urgency: d.urgency || 'repair_soon',
+      estimatedRepairCost: d.estimatedRepairCost || { min: 0, max: 0, currency: 'USD' },
     })),
-    overallCondition:['excellent','good','fair','poor','critical'].includes(p.overallCondition)?p.overallCondition:'fair',
-    conditionRationale:p.conditionRationale||'',
-    summary:p.summary||'Analysis complete.',
-    priorityAction:p.priorityAction||'',
-    totalEstimatedCost:p.totalEstimatedCost||{min:0,max:0,currency:'USD'},
-    inspectionType:p.inspectionType||'other',
-    professionalInspectionNeeded:!!p.professionalInspectionNeeded,
-    disclaimer:p.disclaimer||''
+    overallCondition: ['excellent','good','fair','poor','critical'].includes(p.overallCondition) ? p.overallCondition : 'fair',
+    conditionRationale: p.conditionRationale || '',
+    summary: p.summary || 'Analysis complete.',
+    priorityAction: p.priorityAction || '',
+    totalEstimatedCost: p.totalEstimatedCost || { min: 0, max: 0, currency: 'USD' },
+    inspectionType: p.inspectionType || 'other',
+    professionalInspectionNeeded: !!p.professionalInspectionNeeded,
+    disclaimer: p.disclaimer || '',
   };
 }
 
-async function callAI(messages) {
-  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method:'POST',
-    headers:{
-      'Content-Type':'application/json',
-      'Authorization':`Bearer ${OPENROUTER_API_KEY}`,
-      'HTTP-Referer':'https://snapinspect-ai-server.onrender.com',
-      'X-Title':'SnapInspect AI',
-    },
-    body:JSON.stringify({ model:'google/gemini-2.5-flash', messages, temperature:0.1, max_tokens:3000 }),
-  });
-  if (!r.ok) { const e = await r.text().catch(()=>'err'); throw new Error(`AI error (${r.status}): ${e}`); }
-  const d = await r.json();
-  const t = d.choices?.[0]?.message?.content;
-  if (!t) throw new Error('No response');
-  return t;
-}
+// ─── Routes ───────────────────────────────────────────────────────────────────
 
 app.post('/analyze', async (req, res) => {
   if (!OPENROUTER_API_KEY) return res.status(500).json({ error: 'API key not configured' });
-  const { imageBase64, mediaType='image/jpeg', focusHint, userLocation, description } = req.body;
-  if (!imageBase64||imageBase64.length<100) return res.status(400).json({ error: 'imageBase64 required' });
+  const { imageBase64, mediaType = 'image/jpeg', focusHint, userLocation, description } = req.body;
+  if (!imageBase64 || imageBase64.length < 100) return res.status(400).json({ error: 'imageBase64 required' });
   try {
     const text = await callAI([
-      {role:'system', content:SYSTEM},
-      {role:'user', content:[
-        {type:'image_url', image_url:{url:`data:${mediaType};base64,${imageBase64}`}},
-        {type:'text', text:getInspectPrompt(focusHint||null, userLocation||null, description||null)},
-      ]},
+      { role: 'system', content: INSPECT_SYSTEM },
+      {
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: `data:${mediaType};base64,${imageBase64}` } },
+          { type: 'text', text: getInspectPrompt(focusHint || null, userLocation || null, description || null) },
+        ],
+      },
     ]);
     res.json(normalize(parseJSON(text)));
-  } catch(e) { res.status(500).json({ error:e.message||'Failed' }); }
+  } catch (e) { res.status(500).json({ error: e.message || 'Analysis failed' }); }
 });
 
 app.post('/analyze-room', async (req, res) => {
   if (!OPENROUTER_API_KEY) return res.status(500).json({ error: 'API key not configured' });
   const { imagesBase64, description, userLocation } = req.body;
-  if (!imagesBase64||!Array.isArray(imagesBase64)||imagesBase64.length===0) return res.status(400).json({ error: 'imagesBase64 required' });
+  if (!imagesBase64 || !Array.isArray(imagesBase64) || imagesBase64.length === 0) {
+    return res.status(400).json({ error: 'imagesBase64 array required' });
+  }
   try {
     const text = await callAI([
-      {role:'system', content:SYSTEM},
-      {role:'user', content:[
-        ...imagesBase64.map(b64=>({type:'image_url',image_url:{url:`data:image/jpeg;base64,${b64}`}})),
-        {type:'text', text:getRoomPrompt(description||null, userLocation||null)},
-      ]},
+      { role: 'system', content: INSPECT_SYSTEM },
+      {
+        role: 'user',
+        content: [
+          ...imagesBase64.map(b64 => ({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}` } })),
+          { type: 'text', text: getRoomPrompt(description || null, userLocation || null) },
+        ],
+      },
     ]);
     res.json(normalize(parseJSON(text)));
-  } catch(e) { res.status(500).json({ error:e.message||'Failed' }); }
+  } catch (e) { res.status(500).json({ error: e.message || 'Analysis failed' }); }
 });
 
+// Tutorial uses web search for real prices and stores
 app.post('/tutorial', async (req, res) => {
   if (!OPENROUTER_API_KEY) return res.status(500).json({ error: 'API key not configured' });
   const { defect, userLocation } = req.body;
   if (!defect) return res.status(400).json({ error: 'defect required' });
   try {
-    const text = await callAI([
-      {role:'system', content:SYSTEM},
-      {role:'user', content:getTutorialPrompt(defect, userLocation||null)},
-    ]);
+    const text = await callAIWithSearch(
+      [
+        { role: 'system', content: TUTORIAL_SYSTEM },
+        { role: 'user', content: getTutorialPrompt(defect, userLocation || null) },
+      ],
+      userLocation || null
+    );
     res.json(parseJSON(text));
-  } catch(e) { res.status(500).json({ error:e.message||'Failed' }); }
+  } catch (e) { res.status(500).json({ error: e.message || 'Tutorial failed' }); }
 });
 
-app.listen(PORT, () => console.log('SnapInspect AI v6.3 on port ' + PORT));
+app.listen(PORT, () => console.log('SnapInspect AI v7.0 on port ' + PORT));
