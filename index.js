@@ -2,25 +2,23 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '20mb' }));
+app.use(express.json({ limit: '30mb' }));
 
 const PORT = process.env.PORT || 3000;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
-app.get('/', (req, res) => res.json({ status: 'SnapInspect AI v7.0' }));
+app.get('/', (req, res) => res.json({ status: 'SnapInspect AI v8.0' }));
 
-// ─── Parse location string "City, Country" into OpenRouter user_location object
+// ─── Parse "City, Country" into user_location object for OpenRouter web search
 function parseLocation(userLocation) {
   if (!userLocation) return null;
   const parts = userLocation.split(',').map(s => s.trim());
-  return {
-    type: 'approximate',
-    city: parts[0] || undefined,
-    country: parts[1] || undefined,
-  };
+  const city = parts[0] || undefined;
+  const country = parts[1] || undefined;
+  return { type: 'approximate', city, country };
 }
 
-// ─── Call AI without web search (for image analysis)
+// ─── Plain AI call (for image analysis)
 async function callAI(messages) {
   const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -30,34 +28,27 @@ async function callAI(messages) {
       'HTTP-Referer': 'https://snapinspect-ai-server.onrender.com',
       'X-Title': 'SnapInspect AI',
     },
-    body: JSON.stringify({
-      model: 'google/gemini-2.5-flash',
-      messages,
-      temperature: 0.1,
-      max_tokens: 3000,
-    }),
+    body: JSON.stringify({ model: 'google/gemini-2.5-flash', messages, temperature: 0.1, max_tokens: 3500 }),
   });
-  if (!r.ok) { const e = await r.text().catch(() => 'error'); throw new Error(`AI error (${r.status}): ${e}`); }
+  if (!r.ok) { const e = await r.text().catch(() => 'err'); throw new Error(`AI error (${r.status}): ${e}`); }
   const d = await r.json();
   const t = d.choices?.[0]?.message?.content;
   if (!t) throw new Error('No response from AI');
   return t;
 }
 
-// ─── Call AI WITH web search (for tutorials — finds real prices + stores)
+// ─── AI call WITH web search — for tutorials
 async function callAIWithSearch(messages, userLocation) {
   const locationObj = parseLocation(userLocation);
-
-  // Build the web search tool with location bias
   const webSearchTool = {
     type: 'openrouter:web_search',
     parameters: {
-      max_results: 8,
+      max_results: 10,
+      max_total_results: 30, // allow the AI to make multiple searches for price + store inventory
       search_context_size: 'medium',
       ...(locationObj && { user_location: locationObj }),
     },
   };
-
   const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -71,110 +62,117 @@ async function callAIWithSearch(messages, userLocation) {
       messages,
       tools: [webSearchTool],
       temperature: 0.1,
-      max_tokens: 4000,
+      max_tokens: 5000,
     }),
   });
-
-  if (!r.ok) { const e = await r.text().catch(() => 'error'); throw new Error(`AI error (${r.status}): ${e}`); }
+  if (!r.ok) { const e = await r.text().catch(() => 'err'); throw new Error(`AI error (${r.status}): ${e}`); }
   const d = await r.json();
   const t = d.choices?.[0]?.message?.content;
   if (!t) throw new Error('No response from AI');
   return t;
 }
 
-// ─── Prompts ──────────────────────────────────────────────────────────────────
-
-const INSPECT_SYSTEM = `You are a professional damage inspector and contractor. Identify defects and estimate repair costs accurately based on the type of item — cheap consumer items get replacement costs, structural/vehicle items get contractor rates.`;
-
-function getInspectPrompt(focusHint, userLocation, description) {
-  const focus = focusHint ? `\n\n=== ANALYZE ONLY THIS AREA ===\n${focusHint}\n=== END ===\n\n` : '';
-  const desc = description ? `USER REQUEST: "${description}"\n` : '';
-  const loc = userLocation ? `User location: ${userLocation}.\n` : '';
-  return focus + desc + loc + `
-Analyze the image. Before pricing, identify what the item actually is and what it costs new.
-- Cheap consumer item ($1-10 new): give replacement cost only
-- Mid-range item ($10-100 new): repair or replacement cost
-- Property/structural: contractor rates
-- Vehicle: auto body rates
-
-Return ONLY valid JSON:
-{"defects":[{"id":"1","type":"damage type","severity":"low","confidence":"high","location":"where","dimensions":"size","description":"description","urgency":"optional","estimatedRepairCost":{"min":1,"max":3,"currency":"USD"}}],"overallCondition":"fair","conditionRationale":"why","summary":"2-3 sentence assessment","priorityAction":"what to do","totalEstimatedCost":{"min":1,"max":3,"currency":"USD"},"inspectionType":"other","professionalInspectionNeeded":false,"disclaimer":"Costs reflect actual replacement/repair value for this item type."}
-
-severity: critical/high/medium/low | urgency: immediate/repair_urgent/repair_soon/low_priority/optional
-If no damage: empty defects, excellent condition, costs 0.`;
-}
+// ─── Inspect prompt (same image analysis as before)
+const INSPECT_SYSTEM = `You are a professional damage inspector, contractor, and project estimator. Assess items honestly. Cheap consumer items get replacement costs, property/vehicle items get contractor/auto-body rates. Repair costs should be realistic — never quote $200 to fix a $2 item.`;
 
 function getProjectMode(description) {
   if (!description) return 'inspect';
   const d = description.toLowerCase();
-  if (d.match(/build|install|new|add|construct|fence|deck|shed|patio|driveway|landscap/)) return 'build';
-  if (d.match(/renovat|remodel|redo|update|upgrade|modernize/)) return 'renovate';
+  if (d.match(/build|install|construct|fence|deck|shed|patio|driveway|landscap/)) return 'build';
+  if (d.match(/renovat|remodel|redo|upgrade|modernize/)) return 'renovate';
   return 'inspect';
 }
 
-function getRoomPrompt(description, userLocation) {
+function getInspectPrompt(focusHint, userLocation, description, photoCount) {
+  const focus = focusHint ? `\n\n=== ANALYZE ONLY THIS AREA ===\n${focusHint}\n=== END ===\n\n` : '';
+  const desc = description ? `USER REQUEST: "${description}"\n` : '';
+  const loc = userLocation ? `User location: ${userLocation}.\n` : '';
+  const multi = photoCount > 1 ? `You are looking at ${photoCount} photos of the same subject/space. Analyze them together as one complete picture — each photo may show a different angle, detail, or area. Consolidate findings — don't repeat the same defect twice.\n` : '';
   const mode = getProjectMode(description);
-  const desc = description ? `PROJECT: "${description}"\n` : '';
-  const loc = userLocation ? `Location: ${userLocation}.\n` : '';
-  let modeNote = mode === 'build' ? 'User wants to BUILD. Break into tasks with realistic costs.'
-    : mode === 'renovate' ? 'User wants to RENOVATE. List all tasks in order.'
-    : 'Assess all visible issues with accurate costs for each item type.';
-  return `Analyze ALL photos as one space. ${desc}${loc}${modeNote}
-Price each item based on what it actually is (toy = replacement cost, wall = contractor rates).
-Use same JSON structure as single inspection.`;
+  let modeNote = '';
+  if (mode === 'build') modeNote = 'USER WANTS TO BUILD SOMETHING. Break project into tasks (site prep, materials, installation, finishing). Use construction pricing.\n';
+  else if (mode === 'renovate') modeNote = 'USER WANTS TO RENOVATE. List all tasks in logical order.\n';
+
+  return focus + desc + loc + multi + modeNote + `
+STEP 1: Identify what the item/space actually is and what it costs new (for consumer items) or what class of work it is (for property/construction).
+STEP 2: Use pricing appropriate to that type — cheap items get replacement cost, structural work gets contractor rates.
+STEP 3: Repair cost must never exceed reasonable replacement cost for cheap items.
+
+Return ONLY valid JSON:
+{"defects":[{"id":"1","type":"issue name","severity":"low","confidence":"high","location":"where","dimensions":"size","description":"description","urgency":"optional","estimatedRepairCost":{"min":1,"max":3,"currency":"USD"}}],"overallCondition":"fair","conditionRationale":"why","summary":"2-3 sentence assessment","priorityAction":"what to do","totalEstimatedCost":{"min":1,"max":3,"currency":"USD"},"inspectionType":"other","professionalInspectionNeeded":false,"disclaimer":"Costs reflect realistic values for this item type."}
+
+severity: critical/high/medium/low | urgency: immediate/repair_urgent/repair_soon/low_priority/optional
+If no damage: empty defects, excellent, costs 0.`;
 }
 
-const TUTORIAL_SYSTEM = `You are a contractor and pricing expert. When asked for materials and prices, SEARCH THE WEB for actual current prices in the user's location. Do NOT guess or estimate from memory — search for real prices. Also SEARCH for actual stores near the user that sell these materials.`;
+// ─── Tutorial prompt — aggressive web search for real store inventory
+const TUTORIAL_SYSTEM = `You are a practical repair expert. You MUST use the web_search tool aggressively to find REAL current prices and REAL stores near the user's location that actually sell each material. Never make up store names, addresses, prices, or inventory. Only report what you actually find in search results.`;
 
 function getTutorialPrompt(defect, userLocation) {
-  const loc = userLocation ? `User is in: ${userLocation}.` : '';
-  return `Generate a complete repair/fix guide for this specific issue.
+  const loc = userLocation ? `User location: ${userLocation}` : 'User location: unknown (use general US market)';
+  return `Generate a complete repair guide for this issue. You MUST use the web_search tool to look up REAL prices and REAL store inventory.
 
 DEFECT: ${defect.type || 'damage'}
 Severity: ${defect.severity || 'medium'}
-Location: ${defect.location || 'unknown'}
+Location in item: ${defect.location || 'unknown'}
 Description: ${defect.description || ''}
 Size: ${defect.dimensions || 'unknown'}
 ${loc}
 
-IMPORTANT INSTRUCTIONS:
-1. Search for the ACTUAL current retail price of each material in ${userLocation || 'the user\'s area'} (e.g. search "spray paint price [city]", "craft paint price [store]").
-2. Search for actual stores near ${userLocation || 'the user'} that sell these materials (e.g. search "hardware stores near [city]", "craft stores near [city]", "[material] where to buy [city]").
-3. Only include stores you actually find via search — never make up store names or addresses.
-4. Only include prices you actually find via search — cite the source.
+REQUIRED WEB SEARCH WORKFLOW:
+1. First, decide which materials are actually needed to fix this. Be realistic — a peeling toy doesn't need contractor epoxy, it needs craft paint.
+2. For EACH material, do a web search like:
+   - "[material name] price [city]" (e.g. "acrylic craft paint price Riga")
+   - "[material] [local store chain name]"
+3. For EACH material, ALSO search to find which specific stores near the user ACTUALLY STOCK IT:
+   - "[material name] in stock [city]"
+   - "buy [material] near [city]"
+   - "[local hardware store/craft store] [material]"
+   - Look at store websites when they appear in results
+4. For each store you find in search results, VERIFY it's real by checking the search result mentions the store's name, location, and ideally confirms they sell the item.
+5. Match each material to specific stores that carry it based on what search results show.
+
+RULES:
+- Only include stores that actually appear in your web search results. Never invent.
+- Only include prices that you actually found via web search. Quote the source.
+- If you can't find a store carrying an item, don't list a store for that item.
+- Prefer stores local to ${userLocation || 'the user'} — chain stores AND local independent stores both count.
+- If the user's location is in a non-English country, search in local store chains (e.g. for Latvia: Depo, K-Rauta, Lats, Rimi; for Germany: OBI, Bauhaus, Hornbach; for UK: B&Q, Wickes, Homebase; for Australia: Bunnings; etc.)
 
 Return ONLY valid JSON (no markdown):
 {
-  "overview": "What this defect is and the best way to fix it",
+  "overview": "Explanation of what needs to be done",
   "difficulty": "Easy / Moderate / Advanced",
   "estimatedTime": "e.g. 30 minutes",
   "diyRecommended": true,
-  "safetyNotes": ["safety note if needed"],
+  "safetyNotes": ["if any"],
   "materials": [
     {
-      "name": "material name",
-      "note": "specification (e.g. 'acrylic craft paint, 59ml')",
-      "estimatedCost": "actual price found (e.g. '$2.49 at Walmart')",
-      "source": "where you found this price (store name or website)"
+      "name": "Specific material name",
+      "note": "specification",
+      "estimatedCost": "€2.49 (actual price found)",
+      "availableAt": ["Store A", "Store B"],
+      "source": "URL or store name where price was found"
     }
   ],
-  "totalMaterialCost": "sum of materials",
+  "totalMaterialCost": "sum based on real prices",
   "steps": [
-    {"title": "Step name", "description": "Detailed instruction", "tip": "pro tip or null"}
+    {"title": "Step", "description": "What to do", "tip": "optional tip"}
   ],
   "nearbyStores": [
     {
-      "name": "Store name (real, found via search)",
-      "type": "Hardware store / Craft store / Supermarket / etc",
-      "address": "address if found",
-      "note": "which materials they carry"
+      "name": "Real store name found in search",
+      "type": "Hardware store / Craft store / Supermarket / Online / etc",
+      "address": "address if mentioned in search results, otherwise omit",
+      "website": "store website if found",
+      "carriesItems": ["Material A", "Material B"]
     }
   ],
-  "disclaimer": "Prices from web search and may vary. Check store for current availability."
+  "disclaimer": "Prices from live web search. Verify stock before visiting."
 }`;
 }
 
-// ─── JSON parsing ─────────────────────────────────────────────────────────────
+// ─── Parsing and normalization
 function parseJSON(text) {
   const clean = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
   try { return JSON.parse(clean); } catch {
@@ -210,39 +208,29 @@ function normalize(p) {
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
+// Unified analyze endpoint — accepts imagesBase64 (array, 1 or many)
 app.post('/analyze', async (req, res) => {
   if (!OPENROUTER_API_KEY) return res.status(500).json({ error: 'API key not configured' });
-  const { imageBase64, mediaType = 'image/jpeg', focusHint, userLocation, description } = req.body;
-  if (!imageBase64 || imageBase64.length < 100) return res.status(400).json({ error: 'imageBase64 required' });
-  try {
-    const text = await callAI([
-      { role: 'system', content: INSPECT_SYSTEM },
-      {
-        role: 'user',
-        content: [
-          { type: 'image_url', image_url: { url: `data:${mediaType};base64,${imageBase64}` } },
-          { type: 'text', text: getInspectPrompt(focusHint || null, userLocation || null, description || null) },
-        ],
-      },
-    ]);
-    res.json(normalize(parseJSON(text)));
-  } catch (e) { res.status(500).json({ error: e.message || 'Analysis failed' }); }
-});
 
-app.post('/analyze-room', async (req, res) => {
-  if (!OPENROUTER_API_KEY) return res.status(500).json({ error: 'API key not configured' });
-  const { imagesBase64, description, userLocation } = req.body;
+  // Accept both old format (single imageBase64) and new format (imagesBase64 array)
+  let { imagesBase64, imageBase64, mediaType = 'image/jpeg', focusHint, userLocation, description } = req.body;
+  if (!imagesBase64 && imageBase64) imagesBase64 = [imageBase64];
   if (!imagesBase64 || !Array.isArray(imagesBase64) || imagesBase64.length === 0) {
     return res.status(400).json({ error: 'imagesBase64 array required' });
   }
+
   try {
+    const imageContent = imagesBase64.map(b64 => ({
+      type: 'image_url',
+      image_url: { url: `data:${mediaType};base64,${b64}` },
+    }));
     const text = await callAI([
       { role: 'system', content: INSPECT_SYSTEM },
       {
         role: 'user',
         content: [
-          ...imagesBase64.map(b64 => ({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}` } })),
-          { type: 'text', text: getRoomPrompt(description || null, userLocation || null) },
+          ...imageContent,
+          { type: 'text', text: getInspectPrompt(focusHint || null, userLocation || null, description || null, imagesBase64.length) },
         ],
       },
     ]);
@@ -250,7 +238,13 @@ app.post('/analyze-room', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message || 'Analysis failed' }); }
 });
 
-// Tutorial uses web search for real prices and stores
+// Keep /analyze-room as an alias to /analyze for backwards compat
+app.post('/analyze-room', async (req, res) => {
+  req.url = '/analyze';
+  app._router.handle(req, res, () => {});
+});
+
+// Tutorial with web search
 app.post('/tutorial', async (req, res) => {
   if (!OPENROUTER_API_KEY) return res.status(500).json({ error: 'API key not configured' });
   const { defect, userLocation } = req.body;
@@ -267,4 +261,4 @@ app.post('/tutorial', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message || 'Tutorial failed' }); }
 });
 
-app.listen(PORT, () => console.log('SnapInspect AI v7.0 on port ' + PORT));
+app.listen(PORT, () => console.log('SnapInspect AI v8.0 on port ' + PORT));
