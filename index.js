@@ -8,35 +8,69 @@ app.use(express.json({ limit: '20mb' }));
 const PORT = process.env.PORT || 3000;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
-app.get('/', (req, res) => res.json({ status: 'SnapInspect AI v6.1' }));
+app.get('/', (req, res) => res.json({ status: 'SnapInspect AI v6.2' }));
 
-const SYSTEM = `You are a certified professional inspector, licensed general contractor, and project estimator with 25+ years experience. You handle: damage inspection, property assessment, renovation planning, new construction quotes (fences, decks, sheds, custom builds), landscaping, flooring, painting, plumbing, electrical, roofing, and any other home or commercial project.
+const SYSTEM = `You are a professional inspector, contractor, and estimator with 25+ years experience. You assess all types of items: property, vehicles, electronics, furniture, clothing, toys, documents, artwork, food, and anything else.
 
-ABSOLUTE RULES:
-1. Read the user's description carefully — it tells you exactly what they need.
-2. Never mention photo quality or image clarity.
-3. Only report what is visible. Never fabricate.
-4. A clean result (no damage, no issues) is perfectly valid.
-5. Cost estimates MUST reflect real 2026 market rates for the user's location.`;
+CRITICAL PRICING RULES:
+1. ALWAYS identify what TYPE of item you are looking at before estimating costs.
+2. Apply costs appropriate to that specific item type:
+   - Consumer product (toy, book, clothing, small electronics, printed paper, decoration) = replacement cost from a store, typically $3-$80
+   - Household furniture/appliance = repair or replacement cost, typically $20-$500
+   - Property/structural (walls, floors, roof, foundation) = contractor repair rates
+   - Vehicle = auto body/mechanical repair rates
+   - Commercial equipment = specialist repair rates
+3. NEVER apply contractor repair rates ($200-$5000) to cheap consumer items that cost $5-$50 to replace.
+4. For peeling paint on a toy = just say "repaint with appropriate paint, $4-$12". Do NOT charge contractor rates.
+5. For damaged paper/document = replacement cost only, $0-$20 for reprinting.
+6. Cost estimates must reflect 2026 real market rates adjusted for the user's location.`;
 
-function getPricingRef(userLocation) {
+function getItemContext(userLocation) {
   const loc = userLocation
-    ? `User location: ${userLocation}. Adjust ALL prices to local contractor market rates for this specific area.`
-    : 'Use 2026 US market rates.';
-  return `${loc}
+    ? `User is in ${userLocation}. Adjust prices to local market rates for this area.`
+    : 'Use 2026 market rates.';
+  return loc;
+}
 
-2026 PRICING REFERENCE — adjust for location:
-DAMAGE REPAIR: hairline crack $170-$380; structural crack $920-$4,200; foundation minor $680-$3,100; major $5,500-$28,000; drywall patch $140-$310; drywall panel $420-$950; water stain+repaint $210-$520; mold small $560-$1,600; mold large $2,400-$9,500; wood rot small $380-$1,100; rot structural $1,800-$6,500
-PAINTING: interior room $580-$1,050; full house exterior $4,800-$14,500; fence/deck stain $320-$1,800
-ROOFING: patch $360-$1,050; section $1,200-$5,100; full replacement $10,500-$24,000; gutters $200-$720
-WINDOWS/DOORS: chip repair $140-$390; window replace $310-$760; large window $580-$1,850; door repair $200-$540; exterior door $720-$2,500
-FLOORING: hardwood refinish $4-$9/sqft; tile repair $250-$760; retile $8-$22/sqft; carpet $200-$620; LVP install $3-$8/sqft; hardwood install $6-$14/sqft
-PLUMBING/ELECTRICAL: leak fix $200-$620; pipe section $620-$2,400; outlet/switch $175-$360; panel $680-$3,100
-NEW CONSTRUCTION & BUILDS: wood fence (labor+materials) $18-$45/linear ft; vinyl fence $20-$55/linear ft; chain link $12-$28/linear ft; deck 12x16 $6,500-$18,000; pergola $4,000-$12,000; shed 10x12 $2,800-$9,000; retaining wall $25-$75/sqft; concrete pad $6-$12/sqft; driveway $3,500-$8,000; pathway $8-$18/sqft; landscaping basic $1,500-$5,000
-INTERIOR PROJECTS: kitchen remodel basic $15,000-$35,000; bathroom remodel $8,000-$22,000; basement finish $25-$55/sqft; drywall new $2-$4/sqft installed; insulation $1.50-$4/sqft
-VEHICLE: PDR small dent $175-$470; large dent+paint $510-$1,520; scratch repaint $360-$1,080; rust small $250-$760; rust structural $1,250-$4,800; windshield chip $70-$190; windshield replace $290-$680; bumper repair $360-$960
+function getPricingGuide() {
+  return `PRICING BY ITEM TYPE (2026 rates):
 
-RULE: Use realistic specific numbers. NEVER use round numbers like $500, $1000, $2000. Use values like $340, $1,150, $2,380.`;
+CONSUMER/HOUSEHOLD ITEMS (cheap to replace/fix):
+- Toy with peeling paint: repaint with craft paint $4-$12, or replace toy $8-$45
+- Printed paper/document: reprint $0.10-$3, or replace if valuable $5-$25
+- Small decoration/figurine: repair with glue/paint $2-$15, or replace $5-$60
+- Children's book/magazine: replace $5-$25
+- Clothing with small damage: sew/patch $2-$8, dry cleaning $8-$25
+- Small electronics (phone screen crack): repair $40-$180, replace $80-$400
+- Furniture scratch/dent: touch-up kit $8-$30, professional refinish $50-$200
+- Curtains/bedding: replace $15-$120
+- Kitchen items (chipped plate, cracked mug): replace $3-$25
+
+PROPERTY/STRUCTURAL:
+- Hairline crack cosmetic: $170-$380
+- Structural crack 3mm+: $920-$4,200
+- Foundation crack: $680-$28,000 depending on severity
+- Drywall patch small: $140-$310
+- Water damage/mold small: $490-$1,600
+- Roof patch: $360-$1,050
+- Full roof replacement: $10,500-$24,000
+- Interior repaint room: $580-$1,050
+
+VEHICLE:
+- Small dent (PDR): $175-$470
+- Large dent + repaint: $510-$1,520
+- Scratch repaint panel: $360-$1,080
+- Rust small area: $250-$760
+- Windshield chip: $70-$190, replacement: $290-$680
+- Bumper repair: $360-$960
+
+NEW CONSTRUCTION/BUILD:
+- Wood fence per linear ft: $18-$45
+- Deck 12x16: $6,500-$18,000
+- Shed 10x12: $2,800-$9,000
+- Concrete pad per sqft: $6-$12
+
+ALWAYS match your cost estimate to what makes sense for the actual item shown.`;
 }
 
 function getProjectMode(description) {
@@ -44,100 +78,77 @@ function getProjectMode(description) {
   const d = description.toLowerCase();
   if (d.match(/build|install|new|add|construct|fence|deck|shed|pergola|patio|driveway|landscap|lay|put up|erect/)) return 'build';
   if (d.match(/renovat|remodel|redo|update|upgrade|replace|refresh|modernize/)) return 'renovate';
-  if (d.match(/fix|repair|damage|crack|leak|mold|rust|broken|replace/)) return 'repair';
+  if (d.match(/fix|repair|damage|crack|leak|mold|rust|broken/)) return 'repair';
   return 'assess';
 }
 
 function getInspectPrompt(focusHint, userLocation, description) {
-  const focusBlock = focusHint ? `\n\n=== USER SELECTION - READ FIRST ===\n${focusHint}\n=== END ===\n\n` : '';
-  const descBlock = description ? `\n\nUSER REQUEST: "${description}"\nRespond to this specific request. If it's about building something new, assess the space and provide a build plan. If it's about repairs, focus on damage. If it's about renovation, plan the renovation.` : '';
-  return focusBlock + descBlock + `\n\nAnalyze this image. Return ONLY valid JSON.\n\n${getPricingRef(userLocation)}\n\nReturn EXACTLY this JSON:\n{"defects":[{"id":"1","type":"crack","severity":"high","confidence":"high","location":"where","dimensions":"size","description":"description","urgency":"repair_urgent","estimatedRepairCost":{"min":340,"max":780,"currency":"USD"}}],"overallCondition":"poor","conditionRationale":"why","summary":"2-3 sentence assessment","priorityAction":"most urgent action","totalEstimatedCost":{"min":340,"max":780,"currency":"USD"},"inspectionType":"property","professionalInspectionNeeded":true,"disclaimer":"Cost estimates based on 2026 market rates."}\n\nseverity: critical=immediate / high=urgent 2-4wks / medium=1-3mo / low=cosmetic\nconfidence: high=visible / medium=likely / low=needs check\nIf no damage/issues: empty defects, overallCondition excellent, costs 0.`;
+  const focusBlock = focusHint ? `\n\n=== USER SELECTION — ANALYZE ONLY THIS AREA ===\n${focusHint}\n=== END ===\n\n` : '';
+  const descBlock = description ? `\nUSER REQUEST: "${description}"\n` : '';
+  return focusBlock + descBlock + `
+STEP 1: Identify exactly what type of item or surface you are looking at.
+STEP 2: Apply appropriate pricing for THAT item type (not generic contractor rates).
+${getPricingGuide()}
+${getItemContext(userLocation)}
+
+Analyze the image. Return ONLY valid JSON — no markdown, no explanation.
+
+{"defects":[{"id":"1","type":"peeling paint","severity":"low","confidence":"high","location":"body of toy","dimensions":"approx 3cm area","description":"Paint peeling on plastic toy body, cosmetic damage only","urgency":"low_priority","estimatedRepairCost":{"min":4,"max":12,"currency":"USD"}}],"overallCondition":"fair","conditionRationale":"Minor cosmetic damage only","summary":"The toy has minor paint peeling on the body. This is purely cosmetic and can be touched up with craft paint.","priorityAction":"Optional: touch up with matching craft paint","totalEstimatedCost":{"min":4,"max":12,"currency":"USD"},"inspectionType":"other","professionalInspectionNeeded":false,"disclaimer":"Cost estimates reflect replacement/repair costs appropriate for this item type."}
+
+severity: critical=immediate safety hazard / high=major damage / medium=noticeable damage / low=cosmetic only
+urgency: immediate / repair_urgent / repair_soon / low_priority / optional
+If no damage visible: empty defects array, overallCondition excellent, costs 0.`;
 }
 
 function getRoomPrompt(description, userLocation) {
   const mode = getProjectMode(description);
-
   let modeInstructions = '';
   if (mode === 'build') {
-    modeInstructions = `
-MODE: NEW BUILD / CONSTRUCTION
-The user wants to build or install something. Your job is:
-1. Assess the space/area in the photos — dimensions if estimable, condition of ground/surface, any obstacles
-2. Identify what needs to be done to prepare the space (clearing, grading, permits likely needed, etc.)
-3. Provide a complete cost breakdown for the project as "defects" (use defect entries as project items/tasks)
-4. Each "defect" entry = one project task (e.g. "Site preparation", "Fence posts", "Fence panels", "Gates", "Finishing/staining")
-5. Set severity based on importance: critical=must do first / high=main work / medium=secondary / low=optional finishing
-6. Set urgency: "required" for must-do items, "recommended" for optional items
-7. overallCondition should reflect space readiness: excellent=ready to build / good=minor prep needed / fair=moderate prep / poor=major prep required`;
+    modeInstructions = `MODE: BUILD/INSTALL — User wants to build something. Break the project into tasks. Use construction pricing.`;
   } else if (mode === 'renovate') {
-    modeInstructions = `
-MODE: RENOVATION / REMODEL
-The user wants to renovate or remodel a space. Your job is:
-1. Assess current condition across all photos
-2. Identify all existing damage or issues that must be fixed first
-3. List all renovation tasks needed (each as a "defect" entry)
-4. Include both repair items AND upgrade/replacement items
-5. Sequence items logically: demolition/prep first, then structural, then mechanical, then finishing`;
+    modeInstructions = `MODE: RENOVATE — Find existing damage first, then list all renovation tasks in sequence.`;
   } else if (mode === 'repair') {
-    modeInstructions = `
-MODE: DAMAGE REPAIR
-The user needs specific repairs. Your job is:
-1. Find all visible damage across all photos
-2. Prioritize repairs by urgency
-3. Give detailed cost estimates for each repair`;
+    modeInstructions = `MODE: REPAIR — Find all visible damage and price repairs using appropriate rates for the item type.`;
   } else {
-    modeInstructions = `
-MODE: GENERAL ASSESSMENT
-Analyze all photos together. Identify issues, needs, and opportunities. Respond to the user's specific description if provided.`;
+    modeInstructions = `MODE: ASSESS — Identify all issues and price them using appropriate rates for each item type.`;
   }
 
-  const descBlock = description ? `\n\nUSER'S PROJECT DESCRIPTION: "${description}"` : '';
+  const descBlock = description ? `USER'S PROJECT: "${description}"\n` : '';
+  return `Analyze ALL photos together as one space/project.
+${descBlock}${modeInstructions}
 
-  return `You are analyzing MULTIPLE photos of the same space or project area. Look at ALL images together as one complete picture — each photo may show a different angle, wall, or area.
-${descBlock}
-${modeInstructions}
+${getPricingGuide()}
+${getItemContext(userLocation)}
 
-${getPricingRef(userLocation)}
-
-Return EXACTLY this JSON (use "defect" entries as project items or damage items depending on mode):
-{"defects":[{"id":"1","type":"item name (e.g. Fence posts installation)","severity":"high","confidence":"high","location":"where in the space","dimensions":"size/quantity if estimable","description":"detailed professional description of this item or task","urgency":"repair_urgent","estimatedRepairCost":{"min":340,"max":780,"currency":"USD"}}],"overallCondition":"fair","conditionRationale":"one sentence explaining the overall state","summary":"2-3 sentence professional project summary","priorityAction":"first thing to do","totalEstimatedCost":{"min":340,"max":780,"currency":"USD"},"inspectionType":"property","professionalInspectionNeeded":true,"disclaimer":"Cost estimates based on 2026 market rates for the specified location."}
-
-Total cost = sum of all items. For builds, list EVERY component as a separate item.`;
+Use the same JSON structure as single inspection. Total cost = sum of all items.`;
 }
 
 function getTutorialPrompt(defect, userLocation) {
-  const isProjectItem = defect.urgency === 'required' || defect.urgency === 'recommended';
-  const taskType = isProjectItem ? 'construction/installation task' : 'repair';
+  return `Generate a step-by-step repair/fix guide for this specific item.
 
-  return `You are a licensed contractor with 25+ years experience. Generate a detailed step-by-step guide for this specific ${taskType}.
-
-TASK: ${defect.type || 'work item'}
-Severity/Priority: ${defect.severity || 'medium'}
+ITEM/DEFECT: ${defect.type || 'damage'}
+Severity: ${defect.severity || 'medium'}
 Location: ${defect.location || 'not specified'}
 Description: ${defect.description || ''}
-Size/Quantity: ${defect.dimensions || 'not specified'}
 
-${getPricingRef(userLocation)}
+FIRST: identify what type of item this is (toy, wall, car, furniture, etc.) and tailor your guide to that item.
+
+${getItemContext(userLocation)}
 
 Return ONLY valid JSON:
 {
-  "overview": "2-3 sentence explanation of what this task involves and why it matters",
+  "overview": "What this is and how to fix it",
   "difficulty": "Easy / Moderate / Advanced",
-  "estimatedTime": "e.g. 1 day / 2-3 hours / 1 weekend",
+  "estimatedTime": "e.g. 30 minutes / 2 hours",
   "diyRecommended": true,
-  "safetyNotes": ["safety note 1"],
-  "materials": [
-    {"name": "Material name", "note": "specification or tip", "estimatedCost": "$X-$Y"},
-    {"name": "Tool name", "note": "where to rent if expensive", "estimatedCost": "$X-$Y"}
-  ],
+  "safetyNotes": ["any relevant safety note"],
+  "materials": [{"name": "material name", "note": "where to buy / tip", "estimatedCost": "$X-$Y"}],
   "totalMaterialCost": "$X-$Y",
-  "steps": [
-    {"title": "Step title", "description": "Detailed instructions for this step", "tip": "Pro tip or null"}
-  ],
-  "disclaimer": "Always follow local building codes and obtain permits where required."
+  "steps": [{"title": "Step title", "description": "Detailed instructions", "tip": "Pro tip or null"}],
+  "disclaimer": "Brief note about costs varying"
 }
 
-Adjust material costs for ${userLocation || 'US'} local market rates. If permits are likely required mention that in safetyNotes.`;
+Use prices appropriate for the actual item type. A toy repair should list craft paint ($4-$8), not contractor labor.`;
 }
 
 function parseJSON(text) {
@@ -152,7 +163,7 @@ function parseJSON(text) {
 function normalize(p) {
   return {
     defects:(p.defects||[]).map((d,i)=>({
-      id:d.id||String(i+1), type:d.type||'Unknown item',
+      id:d.id||String(i+1), type:d.type||'Unknown',
       severity:['low','medium','high','critical'].includes(d.severity)?d.severity:'medium',
       confidence:['high','medium','low'].includes(d.confidence)?d.confidence:'medium',
       location:d.location||'', dimensions:d.dimensions||'', description:d.description||'',
@@ -170,7 +181,7 @@ function normalize(p) {
   };
 }
 
-async function callOpenRouter(messages) {
+async function callAI(messages) {
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method:'POST',
     headers:{
@@ -182,8 +193,8 @@ async function callOpenRouter(messages) {
     body:JSON.stringify({ model:'google/gemini-2.5-flash', messages, temperature:0.1, max_tokens:3000 }),
   });
   if (!response.ok) {
-    const err = await response.text().catch(()=>'Unknown error');
-    throw new Error(`OpenRouter error (${response.status}): ${err}`);
+    const err = await response.text().catch(()=>'Unknown');
+    throw new Error(`AI error (${response.status}): ${err}`);
   }
   const data = await response.json();
   const text = data.choices?.[0]?.message?.content;
@@ -191,13 +202,12 @@ async function callOpenRouter(messages) {
   return text;
 }
 
-// Single image analysis
 app.post('/analyze', async (req, res) => {
-  if (!OPENROUTER_API_KEY) return res.status(500).json({ error: 'OPENROUTER_API_KEY not configured' });
+  if (!OPENROUTER_API_KEY) return res.status(500).json({ error: 'API key not configured' });
   const { imageBase64, mediaType='image/jpeg', focusHint, userLocation, description } = req.body;
   if (!imageBase64||imageBase64.length<100) return res.status(400).json({ error: 'Valid imageBase64 required' });
   try {
-    const text = await callOpenRouter([
+    const text = await callAI([
       {role:'system', content:SYSTEM},
       {role:'user', content:[
         {type:'image_url', image_url:{url:`data:${mediaType};base64,${imageBase64}`}},
@@ -208,21 +218,17 @@ app.post('/analyze', async (req, res) => {
   } catch(e) { res.status(500).json({ error:e.message||'Analysis failed' }); }
 });
 
-// Multi-image project/room analysis
 app.post('/analyze-room', async (req, res) => {
-  if (!OPENROUTER_API_KEY) return res.status(500).json({ error: 'OPENROUTER_API_KEY not configured' });
+  if (!OPENROUTER_API_KEY) return res.status(500).json({ error: 'API key not configured' });
   const { imagesBase64, description, userLocation } = req.body;
   if (!imagesBase64||!Array.isArray(imagesBase64)||imagesBase64.length===0) {
     return res.status(400).json({ error: 'imagesBase64 array required' });
   }
   try {
-    const imageContent = imagesBase64.map(b64 => ({
-      type:'image_url', image_url:{url:`data:image/jpeg;base64,${b64}`}
-    }));
-    const text = await callOpenRouter([
+    const text = await callAI([
       {role:'system', content:SYSTEM},
       {role:'user', content:[
-        ...imageContent,
+        ...imagesBase64.map(b64 => ({type:'image_url', image_url:{url:`data:image/jpeg;base64,${b64}`}})),
         {type:'text', text:getRoomPrompt(description||null, userLocation||null)},
       ]},
     ]);
@@ -230,18 +236,17 @@ app.post('/analyze-room', async (req, res) => {
   } catch(e) { res.status(500).json({ error:e.message||'Analysis failed' }); }
 });
 
-// Fix/build tutorial generation
 app.post('/tutorial', async (req, res) => {
-  if (!OPENROUTER_API_KEY) return res.status(500).json({ error: 'OPENROUTER_API_KEY not configured' });
+  if (!OPENROUTER_API_KEY) return res.status(500).json({ error: 'API key not configured' });
   const { defect, userLocation } = req.body;
-  if (!defect) return res.status(400).json({ error: 'defect object required' });
+  if (!defect) return res.status(400).json({ error: 'defect required' });
   try {
-    const text = await callOpenRouter([
+    const text = await callAI([
       {role:'system', content:SYSTEM},
       {role:'user', content:getTutorialPrompt(defect, userLocation||null)},
     ]);
     res.json(parseJSON(text));
-  } catch(e) { res.status(500).json({ error:e.message||'Tutorial generation failed' }); }
+  } catch(e) { res.status(500).json({ error:e.message||'Tutorial failed' }); }
 });
 
-app.listen(PORT, () => console.log('SnapInspect AI v6.1 on port ' + PORT));
+app.listen(PORT, () => console.log('SnapInspect AI v6.2 on port ' + PORT));
